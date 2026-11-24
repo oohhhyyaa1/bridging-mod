@@ -1,10 +1,15 @@
 package dev.hybridbridging;
 
+import net.minecraft.block.BlockItem;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ItemPlacementContext;
+import net.minecraft.item.ItemStack;
+import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
@@ -15,92 +20,73 @@ import java.util.Comparator;
 import java.util.List;
 
 public final class Raycaster {
-    private static final double REACH = 6.0d;
-    private static final double CROSSHAIR_DISTANCE = 4.5d;
-
-    private Raycaster() {
-    }
+    private Raycaster() {}
 
     public static BlockHitResult raycast(PlayerEntity player, World world, double reach) {
-        if (player == null || world == null) {
-            return null;
-        }
+        if (player == null || world == null || !Double.isFinite(reach) || reach <= 0.0d) return null;
         Vec3d start = player.getCameraPosVec(1.0f);
         Vec3d end = start.add(player.getRotationVector().multiply(reach));
-        HitResult hit = world.raycast(new RaycastContext(start, end, RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, player));
-        if (hit.getType() == HitResult.Type.BLOCK) {
-            return (BlockHitResult) hit;
-        }
-        return null;
+        HitResult hit = world.raycast(new RaycastContext(start, end,
+                RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, player));
+        return hit.getType() == HitResult.Type.BLOCK ? (BlockHitResult) hit : null;
     }
 
-    public static BlockHitResult tryFallbackPlacement(
-            PlayerEntity player,
-            World world,
-            BlockPos origin,
-            Direction movementDirection,
-            boolean preferDiagonal,
-            BridgingConfig config
-    ) {
-        if (player == null || world == null || config == null) {
-            return null;
-        }
+    public static BlockHitResult tryFallbackPlacement(PlayerEntity player, World world, BlockPos origin,
+            Hand hand, ItemStack stack, Vec3d movementVector, boolean diagonalAssistance,
+            boolean edgeAssistance, BridgingConfig config) {
+        if (player == null || world == null || origin == null || hand == null || stack == null
+                || stack.isEmpty() || !(stack.getItem() instanceof BlockItem blockItem)
+                || config == null || player.isSpectator()) return null;
 
-        Vec3d eye = player.getEyePos();
-        Vec3d crosshair = eye.add(player.getRotationVector().multiply(CROSSHAIR_DISTANCE));
+        int radius = Math.max(1, Math.min(5, config.fallbackSearchRadius));
+        double tolerance = Double.isFinite(config.placementTolerance)
+                ? Math.max(0.01d, Math.min(1.5d, config.placementTolerance)) : 0.25d;
+        double reach = player.getBlockInteractionRange();
+        if (!Double.isFinite(reach) || reach <= 0.0d) return null;
+
+        Vec3d rayStart = player.getCameraPosVec(1.0f);
+        Vec3d rayEnd = rayStart.add(player.getRotationVector().multiply(reach));
+        Box playerBounds = player.getBoundingBox();
         List<PlacementCandidate> candidates = new ArrayList<>();
 
-        for (int dx = -config.fallbackSearchRadius; dx <= config.fallbackSearchRadius; dx++) {
-            for (int dy = -config.fallbackSearchRadius; dy <= config.fallbackSearchRadius; dy++) {
-                for (int dz = -config.fallbackSearchRadius; dz <= config.fallbackSearchRadius; dz++) {
-                    BlockPos current = origin.add(dx, dy, dz);
-                    BlockState state = world.getBlockState(current);
-                    if (state.isAir()) {
-                        continue;
-                    }
-                    for (Direction direction : Direction.values()) {
-                        BlockPos offset = current.offset(direction);
-                        if (!world.getBlockState(offset).isAir()) {
-                            continue;
-                        }
-                        if (offset.equals(player.getBlockPos())) {
-                            continue;
-                        }
-                        Vec3d candidatePoint = Vec3d.ofBottomCenter(offset);
-                        double distance = candidatePoint.distanceTo(crosshair);
-                        if (distance > config.placementTolerance + config.fallbackSearchRadius) {
-                            continue;
-                        }
-                        boolean isForward = direction == movementDirection;
-                        double score = PlacementLogic.scoreCandidate(
-                                direction,
-                                movementDirection,
-                                isForward,
-                                preferDiagonal,
-                                candidatePoint,
-                                eye,
-                                config.placementTolerance
-                        );
-                        candidates.add(new PlacementCandidate(offset, direction, score));
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos supportPos = origin.add(dx, dy, dz);
+                    BlockState supportState = world.getBlockState(supportPos);
+                    if (supportState.isAir()) continue;
+
+                    for (Direction face : Direction.values()) {
+                        if (!supportState.isSideSolidFullSquare(world, supportPos, face)) continue;
+                        BlockPos placePos = supportPos.offset(face);
+                        if (!world.getBlockState(placePos).isReplaceable()) continue;
+
+                        Box destinationBounds = new Box(placePos.getX(), placePos.getY(), placePos.getZ(),
+                                placePos.getX() + 1.0d, placePos.getY() + 1.0d, placePos.getZ() + 1.0d);
+                        if (playerBounds.intersects(destinationBounds)) continue;
+                        if (!player.canInteractWithBlockAt(supportPos, 0.0d)) continue;
+
+                        Vec3d hitPoint = Vec3d.ofCenter(supportPos).add(face.getOffsetX() * 0.5d,
+                                face.getOffsetY() * 0.5d, face.getOffsetZ() * 0.5d);
+                        if (hitPoint.squaredDistanceTo(rayStart) > reach * reach
+                                || PlacementLogic.distanceToSegment(hitPoint, rayStart, rayEnd) > tolerance) continue;
+
+                        BlockHitResult hitResult = new BlockHitResult(hitPoint, face, supportPos, false);
+                        ItemPlacementContext context = new ItemPlacementContext(player, hand, stack, hitResult);
+                        if (!context.canPlace() || !context.getBlockPos().equals(placePos)
+                                || blockItem.getBlock().getPlacementState(context) == null) continue;
+
+                        double score = PlacementLogic.scoreCandidate(face, movementVector,
+                                diagonalAssistance, edgeAssistance, hitPoint, rayStart, rayEnd, tolerance);
+                        candidates.add(new PlacementCandidate(hitResult, score));
                     }
                 }
             }
         }
 
-        candidates.sort(Comparator.comparingDouble(PlacementCandidate::score).reversed());
-        for (PlacementCandidate candidate : candidates) {
-            BlockPos placePos = candidate.pos();
-            if (world.getBlockState(placePos).isAir() && !placePos.equals(player.getBlockPos())) {
-                return new BlockHitResult(Vec3d.ofCenter(placePos), candidate.direction(), placePos, false);
-            }
-        }
-        return null;
+        return candidates.stream().max(Comparator.comparingDouble(PlacementCandidate::score))
+                .map(PlacementCandidate::hitResult).orElse(null);
     }
 
-    public static double reach() {
-        return REACH;
-    }
-
-    private record PlacementCandidate(BlockPos pos, Direction direction, double score) {
-    }
+    private record PlacementCandidate(BlockHitResult hitResult, double score) {}
 }
