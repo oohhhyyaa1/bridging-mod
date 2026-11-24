@@ -14,7 +14,6 @@ import java.nio.file.Path;
 public final class BridgingConfig {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("bridging-mod.json");
-
     private static BridgingConfig instance;
 
     public boolean enabled = true;
@@ -23,13 +22,10 @@ public final class BridgingConfig {
     public boolean edgeAssistance = true;
     public boolean diagonalAssistance = true;
 
-    private BridgingConfig() {
-    }
+    private BridgingConfig() {}
 
     public static BridgingConfig get() {
-        if (instance == null) {
-            instance = load();
-        }
+        if (instance == null) instance = load();
         return instance;
     }
 
@@ -38,23 +34,37 @@ public final class BridgingConfig {
             try (Reader reader = Files.newBufferedReader(CONFIG_PATH, StandardCharsets.UTF_8)) {
                 BridgingConfig loaded = GSON.fromJson(reader, BridgingConfig.class);
                 if (loaded != null) {
+                    loaded.sanitize();
                     instance = loaded;
+                    save(loaded);
                     return loaded;
                 }
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 HybridBridging.LOGGER.warn("Unable to read config, using defaults", e);
             }
         }
+
         BridgingConfig defaults = new BridgingConfig();
+        defaults.sanitize();
         save(defaults);
         instance = defaults;
         return defaults;
     }
 
+    private void sanitize() {
+        fallbackSearchRadius = Math.max(1, Math.min(5, fallbackSearchRadius));
+        if (!Double.isFinite(placementTolerance)) placementTolerance = 0.25d;
+        placementTolerance = Math.max(0.01d, Math.min(1.5d, placementTolerance));
+    }
+
     public static void save(BridgingConfig config) {
-        try (Writer writer = Files.newBufferedWriter(CONFIG_PATH, StandardCharsets.UTF_8)) {
-            GSON.toJson(config, writer);
-        } catch (IOException e) {
+        try {
+            Files.createDirectories(CONFIG_PATH.getParent());
+            config.sanitize();
+            try (Writer writer = Files.newBufferedWriter(CONFIG_PATH, StandardCharsets.UTF_8)) {
+                GSON.toJson(config, writer);
+            }
+        } catch (IOException | RuntimeException e) {
             HybridBridging.LOGGER.warn("Unable to save config", e);
         }
     }
