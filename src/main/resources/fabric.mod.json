@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "bridging-mod",
-  "version": "\${version}",
+  "version": "${version}",
   "name": "Hybrid Bridging",
   "description": "Client-side Fabric mod that preserves vanilla placement and adds validated fallback placement for bridging.",
   "authors": ["oohhhyyaa1"],
